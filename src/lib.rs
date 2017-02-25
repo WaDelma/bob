@@ -203,9 +203,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             ).parse().unwrap();
             tks.append(&parsed);
         }
-        let x = tks.parse().unwrap();
-        println!("{}", x);
-        x
+        tks.parse().unwrap()
     } else {
         panic!("Only structs supported.");
     }
