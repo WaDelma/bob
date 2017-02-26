@@ -2,7 +2,7 @@
 extern crate bob;
 
 #[derive(Builder, Debug)]
-#[builder_name = "Builder"]
+#[builder_names(builder = "Builder")]
 #[builder_validate(validator = "Struct::validate", error = "BuildError")]
 pub struct Struct {
     a: u32,
@@ -22,7 +22,7 @@ impl Struct {
 }
 
 #[derive(Builder, Debug)]
-#[builder_name = "Builder2"]
+#[builder_names(builder = "Builder2")]
 #[builder_prefix = "set_"]
 #[builder_validate(validator = "validate")]
 struct Struct2<T: Eq> {
@@ -34,8 +34,12 @@ fn validate<T: Eq>(s: Struct2<T>) -> Struct2<T> {
 }
 
 #[derive(Builder, Debug)]
-#[builder_name = "Builder3"]
-#[builder_rename(new = "create", build = "finish")]
+#[builder_names(builder = "Builder3", new = "create", build = "finish")]
+#[builder_docs(
+    builder = "This is a builder.",
+    new = "This is a constructor.",
+    build = "This is a build method."
+)]
 pub struct Struct3<T: Eq> {
     pub a: Option<T>,
     b: Option<u32>,
