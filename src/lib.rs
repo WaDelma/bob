@@ -6,10 +6,11 @@ extern crate quote;
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use syn::{Ident, Field, Ty, Lit, Generics, TyParam, Body, StrStyle, Attribute, Path, PathSegment, PathParameters, AngleBracketedParameterData, Visibility, MetaItem, NestedMetaItem, parse_path};
+use syn::{Ident, Field, Ty, Lit, Generics, PolyTraitRef, TraitBoundModifier, TyParam, TyParamBound, Body, StrStyle, Attribute, Path, PathSegment, PathParameters, Visibility, MetaItem, NestedMetaItem, parse_path};
 
 use std::mem::swap;
 use std::fmt::Display;
+use std::iter::once;
 
 /// Creates builder for struct annotated with 'Builder' attribute.
 #[proc_macro_derive(Builder, attributes(builder_names, builder_prefix, builder_validate, builder_docs))]
@@ -25,38 +26,47 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
 
         let name = &item.ident;
         let vis = &item.vis;
-        let (impl_generics, ty_generics, _) = item.generics.split_for_impl();
+        let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
         // Fields need to be renamed so that they don't conficlict with _marker field.
         let (opt_fields, fields): (Vec<_>, Vec<_>)
             = s.fields()
                 .iter()
                 .enumerate()
-                .map(|(i, f)| (Ident::new(format!("_{}", i)), f))
+                .map(|(i, f)| (Ident::new(format!("_f{}", i)), f))
                 .partition(|&(_, ref f)| is_option(&f.ty));
 
-        // Required fields are wrapped into option so that they can have value before set.
-        // TODO: std::mem::uninitialized() should be able to be used for this
-        let builder_fields: Vec<_> = fields.iter()
-            .map(|&(ref i, ref f)| priv_field(i.clone(), wrap_into_option(f.ty.clone())))
-            .collect();
-        let builder_field_names: &Vec<_> = &builder_fields.iter()
-            .map(|f| f.ident.clone())
-            .collect();
-        // Optional fields are already in optional!
-        let builder_opt_fields: Vec<_> = opt_fields.iter()
+        let builder_mods = &once(builder_mod.clone()).cycle().take(fields.len()).collect::<Vec<_>>();
+
+        // Uninitialized memory is used as innitial value of required fields as type parameters
+        // are used to ensure any of it doesn't get dropped.
+        let builder_fields = &fields.iter()
             .map(|&(ref i, ref f)| priv_field(i.clone(), f.ty.clone()))
-            .collect();
-        let builder_opt_field_names: &Vec<_> = &builder_opt_fields.iter()
+            .collect::<Vec<_>>();
+        let builder_field_names = &builder_fields.iter()
             .map(|f| f.ident.clone())
-            .collect();
+            .collect::<Vec<_>>();
+        // Optional values already have good initial value. And we need to give the user optional anyways.
+        let builder_opt_fields = &opt_fields.iter()
+            .map(|&(ref i, ref f)| priv_field(i.clone(), f.ty.clone()))
+            .collect::<Vec<_>>();
+        let builder_opt_field_names = &builder_opt_fields.iter()
+            .map(|f| f.ident.clone())
+            .collect::<Vec<_>>();
         let result_fields = fields.iter().map(|&(_, f)| &f.ident);
         let result_opt_fields = opt_fields.iter().map(|&(_, f)| &f.ident);
 
-        // Unbound type parameters for builders required fields
-        let builder_ty_params: &Vec<_> = &(0..builder_fields.len())
+        let builder_plain_ty_params = &(0..builder_fields.len())
             .map(|i| plain_ty_param(format!("_{}", i)))
-            .collect();
+            .collect::<Vec<_>>();
+        // Unbound type parameters for builders required fields
+        let builder_ty_params = &(0..builder_fields.len())
+            .map(|i| plain_ty_param(format!("_{}", i)))
+            .map(|mut ty| {
+                ty.bounds.push(TyParamBound::Trait(PolyTraitRef{bound_lifetimes: vec![], trait_ref: Path{global: false, segments: vec![builder_mod.clone().into(), "Destroy".into()]}}, TraitBoundModifier::None));
+                ty
+            })
+            .collect::<Vec<_>>();
 
         // All type parameters that the builder has.
         let mut ext_generics = item.generics.clone();
@@ -78,6 +88,9 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             (0..builder_fields.len())
                 .map(|_| plain_ty_param(format!("{}::I", builder_mod))));
         let (_, end_ty_generics, _) = end_generics.split_for_impl();
+
+        let ty_param_idents = item.generics.ty_params.iter()
+            .map(|t| t.ident.clone());
 
         let required = if fields.is_empty() {
             "".into()
@@ -103,18 +116,38 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
         let build_doc = format!("Builds new `{}`.\n\nThis method is usable only if all required fields are set.", name);
         let mut tks = quote!(
             #[doc(hidden)]
+            #[allow(unused)]
             #vis mod #builder_mod {
                 pub struct O;
                 pub struct I;
-                #[allow(unused)]
+                // This trait is used to either drop set values or forget unset values in builders destructor.
+                pub trait Destroy {
+                    fn destroy<T>(_: T) {}
+                }
+                impl Destroy for I {}
+                impl Destroy for O {
+                    fn destroy<T>(t: T) {
+                        ::std::mem::forget(t);
+                    }
+                }
+                // This function is is used for when user doesn't provide validation function.
                 pub fn id<T>(t: T) -> T {t}
+                #[derive(Clone, Debug)]
+                pub enum BuilderInner #ty_generics #where_clause {
+                    Inner {
+                        // This PhantomData is required for the case where where clause only affects optional fields.
+                        _marker: ::std::marker::PhantomData<(#(#ty_param_idents,)*)>,
+                        #(#builder_fields,)*
+                    },
+                    Empty,
+                }
             }
 
             #[doc = #builder_doc]
             #[derive(Clone, Debug)]
-            #vis struct #builder #ext_ty_generics #ext_where_clause {
-                _marker: ::std::marker::PhantomData<(#(#builder_ty_params),*)>,
-                #(#builder_fields,)*
+            #vis struct #builder #ext_impl_generics #ext_where_clause {
+                _marker: ::std::marker::PhantomData<(#(#builder_plain_ty_params),*)>,
+                inner: #builder_mod::BuilderInner #ty_generics,
                 #(#builder_opt_fields),*
             }
 
@@ -123,9 +156,25 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                 #vis fn #new() -> #builder #start_ty_generics {
                     #builder {
                         _marker: ::std::marker::PhantomData,
-                        #(#builder_field_names: None,)*
+                        inner: #builder_mod::BuilderInner::Inner {
+                            _marker: ::std::marker::PhantomData,
+                            // Using uninitialized should be safe as we use type parameters to ensure that only set fields are dropped.
+                            #(#builder_field_names: unsafe{::std::mem::uninitialized()},)*
+                        },
                         #(#builder_opt_field_names: None),*
                     }
+                }
+            }
+
+            impl #ext_impl_generics Drop for #builder #ext_ty_generics #ext_where_clause {
+                fn drop(&mut self) {
+                    // We forget the required fields that aren't yet set. This should ensure that we don't drop uninitialized memory.
+                    let inner = ::std::mem::replace(&mut self.inner, #builder_mod::BuilderInner::Empty);
+                    if let #builder_mod::BuilderInner::Inner{#(#builder_field_names,)* ..} = inner {
+                        #(<#builder_plain_ty_params as #builder_mods::Destroy>::destroy(#builder_field_names);)*
+                    }
+                    // Now the inner field should be Empty and safe to get rid of.
+                    // Note: The inner field could also be empty if the build method has been called.
                 }
             }
         );
@@ -136,11 +185,18 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                     #ext_where_clause
                 {
                     #[doc = #build_doc]
-                    #vis fn #build(self) -> Result<#name #ty_generics, #error> {
-                        #validator(#name {
-                            #(#result_fields: self.#builder_field_names.unwrap(),)*
-                            #(#result_opt_fields: self.#builder_opt_field_names),*
-                        })
+                    #vis fn #build(mut self) -> Result<#name #ty_generics, #error> {
+                        // Because builder has constructor we have to replace inner to get it's values.
+                        let inner = ::std::mem::replace(&mut self.inner, #builder_mod::BuilderInner::Empty);
+                        if let #builder_mod::BuilderInner::Inner{#(#builder_field_names,)* ..} = inner {
+                            #validator(#name {
+                                #(#result_fields: #builder_field_names,)*
+                                // And take to get optional ones.
+                                #(#result_opt_fields: self.#builder_opt_field_names.take()),*
+                            })
+                        } else {
+                            unreachable!("Inner should only be empty after destructor or after build method.");
+                        }
                     }
                 }
             ).parse().unwrap()
@@ -150,11 +206,18 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                     #ext_where_clause
                 {
                     #[doc = #build_doc]
-                    #vis fn #build(self) -> #name #ty_generics {
-                        #validator(#name {
-                            #(#result_fields: self.#builder_field_names.unwrap(),)*
-                            #(#result_opt_fields: self.#builder_opt_field_names),*
-                        })
+                    #vis fn #build(mut self) -> #name #ty_generics {
+                        // Because builder has constructor we have to replace inner to get it's values.
+                        let inner = ::std::mem::replace(&mut self.inner, #builder_mod::BuilderInner::Empty);
+                        if let #builder_mod::BuilderInner::Inner{#(#builder_field_names,)* ..} = inner {
+                            #validator(#name {
+                                #(#result_fields: #builder_field_names,)*
+                                // And take to get optional ones.
+                                #(#result_opt_fields: self.#builder_opt_field_names.take()),*
+                            })
+                        } else {
+                            unreachable!("Inner should only be empty after destructor or after build method.");
+                        }
                     }
                 }
             ).parse().unwrap()
@@ -162,14 +225,6 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
         tks.append(&parsed);
 
         for (i, &(ref fname, ref field)) in opt_fields.iter().enumerate() {
-            let mut builder_opt_field_names = builder_opt_field_names.clone();
-            builder_opt_field_names.remove(i);
-            let builder_opt_field_names = &builder_opt_field_names;
-
-            // These are needed as workaround: quote doesn't allow binding variable twice in a loop.
-            let builder_field_names2 = builder_field_names;
-            let builder_opt_field_names2 = builder_opt_field_names;
-
             // This being optional field doesn't mean that the setter takes optional.
             let ty = unwrap_from_option(&field.ty).expect("Tried to get inner type from non-Option.");
 
@@ -182,27 +237,16 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #ext_impl_generics #builder #ext_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name(self, #raw_name: #ty) -> #builder #ext_ty_generics {
-                        #builder {
-                            _marker: ::std::marker::PhantomData,
-                            #fname: Some(#raw_name),
-                            #(#builder_field_names: self.#builder_field_names2,)*
-                            #(#builder_opt_field_names: self.#builder_opt_field_names2),*
-                        }
+                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #ext_ty_generics {
+                        self.#fname = Some(#raw_name);
+                        self
                     }
                 }
             ).parse().unwrap();
             tks.append(&parsed);
         }
+
         for (i, &(ref fname, ref field)) in fields.iter().enumerate() {
-            let mut builder_field_names = builder_field_names.clone();
-            builder_field_names.remove(i);
-            let builder_field_names = &builder_field_names;
-
-            // These are needed as workaround: quote doesn't allow binding variable twice in a loop.
-            let builder_field_names2 = builder_field_names;
-            let builder_opt_field_names2 = builder_opt_field_names;
-
             let ty = &field.ty;
 
             // Per field prefixes are supported
@@ -244,13 +288,20 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #other_impl_generics #builder #set_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name(self, #raw_name: #ty) -> #builder #after_set_ty_generics {
-                        #builder {
-                            _marker: ::std::marker::PhantomData,
-                            #fname: Some(#raw_name),
-                            #(#builder_field_names: self.#builder_field_names2,)*
-                            #(#builder_opt_field_names: self.#builder_opt_field_names2),*
+                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #after_set_ty_generics {
+                        if let #builder_mod::BuilderInner::Inner{ref mut #fname, ..} = self.inner {
+                            unsafe {
+                                // We have to write the value, because the field is uninitialized.
+                                ::std::ptr::write(#fname as *mut _, #raw_name);
+                            }
+                        } else {
+                            unreachable!("Inner should only be empty after destructor or after build method.");
                         }
+                        // Because the builder has destructor fields cannot moved out.
+                        // This is why we have to read self as return type and forget the old self.
+                        let out = unsafe { ::std::ptr::read(&self as *const _ as *const _) };
+                        ::std::mem::forget(self);
+                        out
                     }
                 }
             ).parse().unwrap();
@@ -264,7 +315,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
 
 #[inline(always)]
 fn debug_display<T: Display>(t: T) -> T {
-    // println!("{}", t);
+    //println!("{}", t);
     t
 }
 
@@ -279,16 +330,6 @@ fn unwrap_from_option(ty: &Ty) -> Option<&Ty> {
         }
     }
     None
-}
-
-/// Wraps type T into Option<T>
-fn wrap_into_option(ty: Ty) -> Ty {
-    let mut params = AngleBracketedParameterData::default();
-    params.types.push(ty);
-    Ty::Path(None, PathSegment {
-            ident: Ident::new("Option"),
-            parameters: PathParameters::AngleBracketed(params),
-        }.into())
 }
 
 /// Checks if give type is Option
@@ -352,7 +393,7 @@ fn get_builder_names(attrs: &[Attribute]) -> (Ident, Ident, Ident) {
             }
             None
         })
-        .fold((Ident::new("builder"), Ident::new("new"), Ident::new("build")), |(builder, new, build), (which, v)| {
+        .fold((Ident::new("Builder"), Ident::new("new"), Ident::new("build")), |(builder, new, build), (which, v)| {
             use Named::*;
             match which {
                 Builder => (v, new, build),
