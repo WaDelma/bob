@@ -1,0 +1,10 @@
+[package]
+name = "bob_test"
+version = "0.1.0"
+authors = ["Wadelma <delma@del.ma>"]
+
+[dev-dependencies]
+compiletest_rs = "*"
+
+[dependencies.bob]
+path = "../bob"
