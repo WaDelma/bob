@@ -1,5 +1,102 @@
 #![recursion_limit = "1024"]
 
+//! # Bob the builder builder
+//! Bob provides custom derive for generating builder for struct.
+//!
+//! It uses the type system to force user of the builder to provide all required fields.
+//! # Examples
+//! Basic usage:
+//!
+//! ````
+//! #[macro_use]
+//! extern crate bob;
+//!
+//! #[derive(Builder)]
+//! #[builder_derive(Debug, Clone)]
+//! struct MyStruct {
+//!     // Greeting is optional
+//!     greeting: Option<String>,
+//!     // Magic numbers are required
+//!     magics: Vec<i32>,
+//! }
+//!
+//! fn main() {
+//!     let my_struct = Builder::new()
+//!         .magic(vec![42, 7, 3]) // This line is required. Removing it gives error.
+//!         .greeting("Potato".to_owned()) // This line is optional.
+//!                                        // Removing it will result in `None` in the final struct.
+//!         .build();
+//!     println!("Hello, {}!", my_struct.greeting.unwrap_or("World".to_owned()));
+//!     println!("{} is the answer", my_struct.magic[0]);
+//! }
+//! ````
+//! This example results in [this code](./fn.example_1_expanded.html) to be generated (after cleaning it up and adding comments).
+//!
+//! Renaming builder:
+//!
+//! ````
+//! #[macro_use]
+//! extern crate bob;
+//!
+//! #[derive(Builder)]
+//! #[builder_names(builder = "MyBuilder", new = "create", build = "finish")]
+//! #[builder_prefix = "set_"]
+//! struct MyStruct<A, B> {
+//!     firsts: Vec<A>,
+//!     #[builder_prefix = "with_"]
+//!     seconds: Vec<B>,
+//! }
+//!
+//! fn main() {
+//!     let my_struct = MyBuilder::create()
+//!         .set_firsts(vec![1, 1, 2, 3, 5, 8])
+//!         .with_seconds(vec![2, 3, 5, 7, 11])
+//!         .finish();
+//!     let a: i32 = my_struct.firsts.iter().sum();
+//!     let b: i32 = my_struct.seconds.iter().sum();
+//!     println!("{}", a + b);
+//! }
+//! ````
+//! This example results in [this code](./fn.example_2_expanded.html) to be generated (after cleaning it up and adding comments).
+//!
+//! Validating fields:
+//!
+//! ````
+//! #[macro_use]
+//! extern crate bob;
+//!
+//! #[derive(Builder)]
+//! #[builder_validate(validator = "MyStruct::validate", error = "BuildError")]
+//! struct MyStruct {
+//!     super_secret: String,
+//! }
+//!
+//! enum BuildError {
+//!     CatastrophicFailure
+//! }
+//!
+//! impl MyStruct {
+//!     fn validate(self) -> Result<Self, BuildError> {
+//!         if self.super_secret == "00000000" {
+//!             Ok(self)
+//!         } else {
+//!             Err(BuildError::CatastrophicFailure)
+//!         }
+//!     }
+//! }
+//!
+//! fn main() {
+//!     let my_struct = Builder::new()
+//!         .super_secret("password")
+//!         .build();
+//!     if let Ok(_) = my_struct {
+//!         println!("Access granted.");
+//!     } else {
+//!         println!("Permission denied!");
+//!     }
+//! }
+//! ````
+//! This example results in [this code](./fn.example_3_expanded.html) to be generated (after cleaning it up and adding comments).
 extern crate syn;
 #[macro_use]
 extern crate quote;
@@ -11,6 +108,483 @@ use syn::{Ident, Field, Ty, Lit, Generics, PolyTraitRef, TraitBoundModifier, TyP
 use std::mem::swap;
 use std::fmt::Display;
 use std::collections::HashSet;
+
+/// ````
+/// # use std::fmt::{Debug, Error, Formatter};
+/// # use std::mem::{uninitialized, forget, replace};
+/// # use std::ptr::{write, read};
+/// # use std::marker::PhantomData;
+/// # use _mybuilder::*;
+/// #[doc(hidden)]
+/// #[allow(unused)]
+/// mod _mybuilder {
+///     use super::*;
+///     // Indicates that value isn't set
+///     pub struct O;
+///     // Indicates that value is set
+///     pub struct I;
+///     // Trait that handles unsafety of uninitialized fields
+///     pub trait MaybeInitialized {
+///         // Either clones variable or creates uninitialized one.
+///         unsafe fn replicate<T: Clone>(t: &T) -> T;
+///         // Either drops value or forgets it.
+///         fn destroy<T>(t: T);
+///         // Get the value as debug string or as representation of empty value.
+///         fn expose<T: Debug>(t: &T) -> &Debug;
+///     }
+///     impl MaybeInitialized for I {
+///         unsafe fn replicate<T: Clone>(t: &T) -> T {
+///             t.clone()
+///         }
+///         fn destroy<T>(t: T) { }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             t
+///         }
+///     }
+///     impl MaybeInitialized for O {
+///         unsafe fn replicate<T: Clone>(_: &T) -> T {
+///             uninitialized()
+///         }
+///         fn destroy<T>(t: T) {
+///             forget(t);
+///         }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             // This struct is used to give clean debug representation
+///             #[derive(Debug)]
+///             struct Uninitialized;
+///             const UNINITIALIZED: &'static Uninitialized = &Uninitialized;
+///             UNINITIALIZED
+///         }
+///     }
+///     // This function is is used for when user doesn't provide validation function.
+///     pub fn id<T>(t: T) -> T {
+///         t
+///     }
+///     pub enum BuilderInner {
+///         Inner {
+///             // This PhantomData is required for the case where
+///             // `where` clause only affects optional fields.
+///             _marker: PhantomData<()>,
+///             _f1: Vec<i32>,
+///         },
+///         Empty,
+///     }
+/// }
+/// /// Builder for `MyStruct`.
+/// /// # Required fields
+/// /// * `magics`
+/// ///
+/// /// # Optional fields
+/// /// * `greeting`
+/// ///
+/// struct Builder<_0: MaybeInitialized> {
+///     _marker: PhantomData<(_0)>,
+///     inner: BuilderInner,
+///     _f0: Option<String>,
+/// }
+/// impl Builder<O> {
+///     /// Constructor for builder.
+///     ///
+///     /// All fields are unset at the start.
+///     fn new() -> Builder<O> {
+///         Builder{
+///             _marker: PhantomData,
+///             inner: BuilderInner::Inner {
+///                 _marker: PhantomData,
+///                 // Using uninitialized should be safe as we use
+///                 // type parameters to ensure that only set fields are dropped.
+///                 _f1: unsafe { uninitialized() },
+///             },
+///             _f0: None,
+///         }
+///     }
+/// }
+/// impl <_0: MaybeInitialized> Drop for Builder<_0> {
+///     fn drop(&mut self) {
+///         // We first swap the inner field to be empty so that builder is safe to drop
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         // We get the fields of the inner if they are present.
+///         // If the builders build method has been called the inner is already empty.
+///         if let BuilderInner::Inner { _f1, .. } = inner {
+///             // And then drop required fields that are set and forget those that aren't.
+///             // This should ensure that we don't drop uninitialized memory.
+///             _0::destroy(_f1);
+///         }
+///     }
+/// }
+/// // CLone has to be manually implemented,
+/// // because derived one would call clone on uninitialized memory.
+/// impl <_0: MaybeInitialized> Clone for Builder<_0> {
+///     fn clone(&self) -> Self {
+///         if let BuilderInner::Inner { ref _f1, .. } = self.inner {
+///             Builder {
+///                 _marker: PhantomData,
+///                 inner: BuilderInner::Inner{
+///                     _marker: PhantomData,
+///                     // We call clone on the set fields and
+///                     // create uninitialized values for unset fields
+///                     _f1: unsafe { _0::replicate(_f1) },
+///                 },
+///                 _f0: self._f0.clone(),
+///             }
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///     }
+/// }
+/// // Debug has to be manually implemented,
+/// // because derived one would call debug on uninitialized memory.
+/// impl <_0: MaybeInitialized> Debug for Builder<_0> {
+///     fn fmt(&self, fmt: &mut Formatter) -> Result<(), Error> {
+///         if let BuilderInner::Inner { ref _f1, .. } = self.inner {
+///             fmt.debug_struct(stringify!(Builder))
+///                 // We use initialized fields `Debug` implementation
+///                 // and uninitialized to text marking them such.
+///                 .field(stringify!(_f1), &_0::expose(_f1))
+///                 .field(stringify!(_f0), &self._f0)
+///                 .finish()
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///     }
+/// }
+/// impl Builder<I> {
+///     /// Builds new `MyStruct`.
+///     ///
+///     /// This method is usable only if all required fields are set.
+///     fn build(mut self) -> MyStruct {
+///         // Because builder has destructor we have to replace inner to get it's values.
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         if let BuilderInner::Inner { _f1, .. } = inner {
+///             id(MyStruct {
+///                 magic: _f1,
+///                 // And take to get optional ones.
+///                 greeting: self._f0.take(),
+///             })
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///     }
+/// }
+/// impl <_0: MaybeInitialized> Builder<_0> {
+///     /// Setter method for **optional** field `greeting`.
+///     fn greeting<_T: Into<String>>(mut self, greeting: _T) -> Builder<_0> {
+///         self._f0 = Some(greeting.into());
+///         self
+///     }
+/// }
+/// impl Builder<O> {
+///     /// Setter method for **required** field `magics`.
+///     fn magic<_T: Into<Vec<i32>>>(mut self, magic: _T) -> Builder<I> {
+///         if let BuilderInner::Inner { ref mut _f1, .. } = self.inner {
+///             // We have to write the value, because the field is uninitialized.
+///             unsafe { write(_f1 as *mut _, magic.into()); }
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///         // Because the builder has destructor fields cannot moved out.
+///         // This is why we have to read self as return type and forget the old self.
+///         let out = unsafe { read(&self as *const _ as *const _) };
+///         forget(self);
+///         out
+///     }
+/// }
+/// ````
+#[proc_macro_derive(Dummy1)]
+pub fn example_1_expanded(_: TokenStream) -> TokenStream {unreachable!("Because there cannot be non-procmacro items in procmacro crate this hack is needed.")}
+trait Dummy1 {}
+
+/// ````
+/// # use std::fmt::{Debug, Error, Formatter};
+/// # use std::mem::{uninitialized, forget, replace};
+/// # use std::ptr::{write, read};
+/// # use std::marker::PhantomData;
+/// # use _mybuilder::*;
+/// #[doc(hidden)]
+/// #[allow(unused)]
+/// mod _mybuilder {
+///     use super::*;
+///     // Indicates that value isn't set
+///     pub struct O;
+///     // Indicates that value is set
+///     pub struct I;
+///     // Trait that handles unsafety of uninitialized fields
+///     pub trait MaybeInitialized {
+///         // Either clones variable or creates uninitialized one.
+///         unsafe fn replicate<T: Clone>(t: &T) -> T;
+///         // Either drops value or forgets it.
+///         fn destroy<T>(t: T);
+///         // Get the value as debug string or as representation of empty value.
+///         fn expose<T: Debug>(t: &T) -> &Debug;
+///     }
+///     impl MaybeInitialized for I {
+///         unsafe fn replicate<T: Clone>(t: &T) -> T {
+///             t.clone()
+///         }
+///         fn destroy<T>(t: T) { }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             t
+///         }
+///     }
+///     impl MaybeInitialized for O {
+///         unsafe fn replicate<T: Clone>(_: &T) -> T {
+///             uninitialized()
+///         }
+///         fn destroy<T>(t: T) {
+///             forget(t);
+///         }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             // This struct is used to give clean debug representation
+///             #[derive(Debug)]
+///             struct Uninitialized;
+///             const UNINITIALIZED: &'static Uninitialized = &Uninitialized;
+///             UNINITIALIZED
+///         }
+///     }
+///     // This function is is used for when user doesn't provide validation function.
+///     // It's unused in this example
+///     pub fn id<T>(t: T) -> T {
+///         t
+///     }
+///     pub enum BuilderInner<A, B> {
+///         Inner {
+///             // This PhantomData is required for the case where
+///             // `where` clause only affects optional fields.
+///             _marker: PhantomData<(A, B)>,
+///             _f0: Vec<A>,
+///             _f1: Vec<B>,
+///         },
+///         Empty,
+///     }
+/// }
+/// /// Builder for `MyStruct`.
+/// /// # Required fields
+/// /// * `firsts`
+/// /// * `seconds`
+/// ///
+/// ///
+/// struct MyBuilder<_0: MaybeInitialized, _1: MaybeInitialized, A, B> {
+///     _marker: PhantomData<(_0, _1)>,
+///     inner: BuilderInner<A, B>,
+/// }
+/// impl <A, B> MyBuilder<O, O, A, B> {
+///     /// Constructor for builder.
+///     ///
+///     /// All fields are unset at the start.
+///     fn create() -> MyBuilder<O, O, A, B> {
+///         MyBuilder{
+///             _marker: PhantomData,
+///             inner: BuilderInner::Inner {
+///                 _marker: PhantomData,
+///                // Using uninitialized should be safe as we use
+///                // type parameters to ensure that only set fields are dropped.
+///                 _f0: unsafe { uninitialized() },
+///                 _f1: unsafe { uninitialized() },
+///             },
+///         }
+///     }
+/// }
+/// impl <_0: MaybeInitialized, _1: MaybeInitialized, A, B> Drop for MyBuilder<_0, _1, A, B> {
+///     fn drop(&mut self) {
+///         // We first swap the inner field to be empty so that builder is safe to drop
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         // We get the fields of the inner if they are present.
+///         // If the builders build method has been called the inner is already empty.
+///         if let BuilderInner::Inner { _f0, _f1, .. } = inner {
+///             // And then drop required fields that are set and forget those that aren't.
+///             // This should ensure that we don't drop uninitialized memory.
+///             _0::destroy(_f0);
+///             _1::destroy(_f1);
+///         }
+///     }
+/// }
+/// impl <A, B> MyBuilder<I, I, A, B> {
+///     /// Builds new `MyStruct`.
+///     ///
+///     /// This method is usable only if all required fields are set.
+///     fn finish(mut self) -> MyStruct<A, B> {
+///         // Because builder has destructor we have to replace inner to get it's values.
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         if let BuilderInner::Inner { _f0, _f1, .. } = inner {
+///             id(MyStruct{
+///                 firsts: _f0,
+///                 seconds: _f1,
+///             })
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///     }
+/// }
+/// impl <_1: MaybeInitialized, A, B> MyBuilder<O, _1, A, B> {
+///     /// Setter method for **required** field `firsts`.
+///     fn set_firsts<_T: Into<Vec<A>>>(mut self, firsts: _T) -> MyBuilder<I, _1, A, B> {
+///         if let BuilderInner::Inner { ref mut _f0, .. } = self.inner {
+///             // We have to write the value, because the field is uninitialized.
+///             unsafe { write(_f0 as *mut _, firsts.into()); }
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///         // Because the builder has destructor fields cannot moved out.
+///         // This is why we have to read self as return type and forget the old self.
+///         let out = unsafe { read(&self as *const _ as *const _) };
+///         forget(self);
+///         out
+///     }
+/// }
+/// impl <_0: MaybeInitialized, A, B> MyBuilder<_0, O, A, B> {
+///     /// Setter method for **required** field `seconds`.
+///     fn with_seconds<_T: Into<Vec<B>>>(mut self, seconds: _T) -> MyBuilder<_0, I, A, B> {
+///         if let BuilderInner::Inner { ref mut _f1, .. } = self.inner {
+///             // We have to write the value, because the field is uninitialized.
+///             unsafe { write(_f1 as *mut _, seconds.into()); }
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///         // Because the builder has destructor fields cannot moved out.
+///         // This is why we have to read self as return type and forget the old self.
+///         let out = unsafe { read(&self as *const _ as *const _) };
+///         forget(self);
+///         out
+///     }
+/// }
+/// ````
+#[proc_macro_derive(Dummy2)]
+pub fn example_2_expanded(_: TokenStream) -> TokenStream {unreachable!("Because there cannot be non-procmacro items in procmacro crate this hack is needed.")}
+trait Dummy2 {}
+
+/// ````
+/// # use std::fmt::{Debug, Error, Formatter};
+/// # use std::mem::{uninitialized, forget, replace};
+/// # use std::ptr::{write, read};
+/// # use std::marker::PhantomData;
+/// # use _mybuilder::*;
+///
+/// #[doc(hidden)]
+/// #[allow(unused)]
+/// mod _builder {
+///     use super::*;
+///     // Indicates that value isn't set
+///     pub struct O;
+///     // Indicates that value is set
+///     pub struct I;
+///     // Trait that handles unsafety of uninitialized fields
+///     pub trait MaybeInitialized {
+///         // Either clones variable or creates uninitialized one.
+///         unsafe fn replicate<T: Clone>(t: &T) -> T;
+///         // Either drops value or forgets it.
+///         fn destroy<T>(t: T);
+///         // Get the value as debug string or as representation of empty value.
+///         fn expose<T: Debug>(t: &T) -> &Debug;
+///     }
+///     impl MaybeInitialized for I {
+///         unsafe fn replicate<T: Clone>(t: &T) -> T {
+///             t.clone()
+///         }
+///         fn destroy<T>(t: T) { }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             t
+///         }
+///     }
+///     impl MaybeInitialized for O {
+///         unsafe fn replicate<T: Clone>(_: &T) -> T {
+///             uninitialized()
+///         }
+///         fn destroy<T>(t: T) {
+///             forget(t);
+///         }
+///         fn expose<T: Debug>(t: &T) -> &Debug {
+///             // This struct is used to give clean debug representation
+///             #[derive(Debug)]
+///             struct Uninitialized;
+///             const UNINITIALIZED: &'static Uninitialized = &Uninitialized;
+///             UNINITIALIZED
+///         }
+///     }
+///     // This function is is used for when user doesn't provide validation function.
+///     pub fn id<T>(t: T) -> T {
+///         t
+///     }
+///     pub enum BuilderInner {
+///         Inner {
+///             // This PhantomData is required for the case where
+///             // `where` clause only affects optional fields.
+///             _marker: PhantomData<()>,
+///             _f0: String,
+///         },
+///         Empty,
+///     }
+/// }
+/// /// Builder for `MyStruct`.
+/// /// # Required fields
+/// /// * `super_secret`
+/// ///
+/// ///
+/// struct Builder<_0: MaybeInitialized> {
+///     _marker: PhantomData<(_0)>,
+///     inner: BuilderInner,
+/// }
+/// impl Builder<O> {
+///     /// Constructor for builder.
+///     ///
+///     /// All fields are unset at the start.
+///     fn new() -> Builder<O> {
+///         Builder{
+///             _marker: PhantomData,
+///             inner: BuilderInner::Inner {
+///                 _marker: PhantomData,
+///                 // Using uninitialized should be safe as we use
+///                 // type parameters to ensure that only set fields are dropped.
+///                 _f0: unsafe { uninitialized() },
+///             },
+///         }
+///     }
+/// }
+/// impl <_0: MaybeInitialized> Drop for Builder<_0> {
+///     fn drop(&mut self) {
+///         // We first swap the inner field to be empty so that builder is safe to drop
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         // We get the fields of the inner if they are present.
+///         // If the builders build method has been called the inner is already empty.
+///         if let BuilderInner::Inner { _f0, .. } = inner {
+///             // And then drop required fields that are set and forget those that aren't.
+///             // This should ensure that we don't drop uninitialized memory.
+///             _0::destroy(_f0);
+///         }
+///     }
+/// }
+/// impl Builder<I> {
+///     /// Builds new `MyStruct`.
+///     ///
+///     /// This method is usable only if all required fields are set.
+///     fn build(mut self) -> Result<MyStruct, BuildError> {
+///         let inner = replace(&mut self.inner, BuilderInner::Empty);
+///         if let BuilderInner::Inner { _f0, .. } = inner {
+///             MyStruct::validate(MyStruct {
+///                 super_secret: _f0,
+///             })
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///     }
+/// }
+/// impl Builder<O> {
+///     ///Setter method for **required** field `super_secret`.
+///     fn super_secret<_T: Into<String>>(mut self, super_secret: _T) -> Builder<I> {
+///         // Because builder has destructor we have to replace inner to get it's values.
+///         if let BuilderInner::Inner { ref mut _f0, .. } = self.inner {
+///             unsafe { write(_f0 as *mut _, super_secret.into()); }
+///         } else {
+///             unreachable!("Inner should only be empty after destructor or after build method.");
+///         }
+///         let out = unsafe { read(&self as *const _ as *const _) };
+///         forget(self);
+///         out
+///     }
+/// }
+/// ````
+#[proc_macro_derive(Dummy3)]
+pub fn example_3_expanded(_: TokenStream) -> TokenStream {unreachable!("Because there cannot be non-procmacro items in procmacro crate this hack is needed.")}
+trait Dummy3 {}
 
 /// Creates builder for struct annotated with 'Builder' attribute.
 #[proc_macro_derive(Builder, attributes(builder_names, builder_prefix, builder_validate, builder_docs, builder_derive))]
@@ -143,15 +717,17 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             #[allow(unused)]
             #vis mod #builder_mod {
                 use super::*;
+                // Indicates that value isn't set
                 pub struct O;
+                // Indicates that value is set
                 pub struct I;
-                // Handles unsafety of uninitialized fields
+                // Trait that handles unsafety of uninitialized fields
                 pub trait MaybeInitialized {
                     // Either clones variable or creates uninitialized one.
                     unsafe fn replicate<T: Clone>(t: &T) -> T;
                     // Either drops value or forgets it.
                     fn destroy<T>(t: T);
-                    // Get the value as debug string or empty representation.
+                    // Get the value as debug string or as representation of empty value.
                     fn expose<T: ::std::fmt::Debug>(t: &T) -> &::std::fmt::Debug;
                 }
                 impl MaybeInitialized for I {
@@ -171,6 +747,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                         ::std::mem::forget(t);
                     }
                     fn expose<T: ::std::fmt::Debug>(t: &T) -> &::std::fmt::Debug {
+                        // This struct is used to give clean debug representation
                         #[derive(Debug)]
                         struct Uninitialized;
                         const UNINITIALIZED: &'static Uninitialized = &Uninitialized;
@@ -181,7 +758,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                 pub fn id<T>(t: T) -> T {t}
                 pub enum BuilderInner #ty_generics #where_clause {
                     Inner {
-                        // This PhantomData is required for the case where where clause only affects optional fields.
+                        // This PhantomData is required for the case where `where` clause only affects optional fields.
                         _marker: ::std::marker::PhantomData<(#(#ty_param_idents,)*)>,
                         #(#builder_fields,)*
                     },
@@ -256,11 +833,11 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                 impl #ext_debug_impl_generics ::std::fmt::Debug for #builder #ext_ty_generics #ext_where_clause {
                     fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
                         if let #builder_mod::BuilderInner::Inner{#(ref #builder_field_names,)* ..} = self.inner {
-                            // We turn initialized fields to String using their Debug implementation
-                            // and uninitialized to text marking them such.
                             fmt.debug_struct(stringify!(#builder))
+                                // We use initialized fields `Debug` implementation
+                                // and uninitialized to text marking them such.
                                 #(.field(stringify!(#builder_field_names), &#builder_plain_ty_params::expose(#builder_field_names2)))*
-                                #(.field(stringify!(#builder_opt_field_names), self.#builder_opt_field_names2))*
+                                #(.field(stringify!(#builder_opt_field_names), &self.#builder_opt_field_names2))*
                                 .finish()
                         } else {
                             unreachable!("Inner should only be empty after destructor or after build method.");
@@ -278,7 +855,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                 {
                     #[doc = #build_doc]
                     #vis fn #build(mut self) -> Result<#name #ty_generics, #error> {
-                        // Because builder has constructor we have to replace inner to get it's values.
+                        // Because builder has destructor we have to replace inner to get it's values.
                         let inner = ::std::mem::replace(&mut self.inner, #builder_mod::BuilderInner::Empty);
                         if let #builder_mod::BuilderInner::Inner{#(#builder_field_names,)* ..} = inner {
                             #validator(#name {
@@ -299,7 +876,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                 {
                     #[doc = #build_doc]
                     #vis fn #build(mut self) -> #name #ty_generics {
-                        // Because builder has constructor we have to replace inner to get it's values.
+                        // Because builder has destructor we have to replace inner to get it's values.
                         let inner = ::std::mem::replace(&mut self.inner, #builder_mod::BuilderInner::Empty);
                         if let #builder_mod::BuilderInner::Inner{#(#builder_field_names,)* ..} = inner {
                             #validator(#name {
@@ -329,8 +906,8 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #ext_impl_generics #builder #ext_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #ext_ty_generics {
-                        self.#fname = Some(#raw_name);
+                    #vis fn #name<_T: Into<#ty>>(mut self, #raw_name: _T) -> #builder #ext_ty_generics {
+                        self.#fname = Some(#raw_name.into());
                         self
                     }
                 }
@@ -380,12 +957,10 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #other_impl_generics #builder #set_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #after_set_ty_generics {
+                    #vis fn #name<_T: Into<#ty>>(mut self, #raw_name: _T) -> #builder #after_set_ty_generics {
                         if let #builder_mod::BuilderInner::Inner{ref mut #fname, ..} = self.inner {
-                            unsafe {
-                                // We have to write the value, because the field is uninitialized.
-                                ::std::ptr::write(#fname as *mut _, #raw_name);
-                            }
+                            // We have to write the value, because the field is uninitialized.
+                            unsafe { ::std::ptr::write(#fname as *mut _, #raw_name.into()); }
                         } else {
                             unreachable!("Inner should only be empty after destructor or after build method.");
                         }
