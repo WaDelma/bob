@@ -3,6 +3,7 @@ extern crate bob;
 
 #[derive(Builder, Debug)]
 #[builder_names(builder = "Builder")]
+#[builder_derive(Clone, Debug)]
 #[builder_validate(validator = "Struct::validate", error = "BuildError")]
 pub struct Struct {
     a: u32,
@@ -47,15 +48,38 @@ pub struct Struct3<T: Eq> {
     c: i32,
 }
 
+#[derive(Debug)]
+pub struct Unclone<T>(T);
+
+#[derive(Builder, Debug)]
+#[builder_names(builder = "Builder4")]
+pub struct Struct4 {
+    a: Unclone<i32>,
+}
+
+#[derive(Builder, Debug)]
+#[builder_names(builder = "Builder5")]
+pub struct Struct5 {
+    a: Option<Unclone<i32>>,
+}
+
+
 #[test]
 fn build() {
-    let built = Builder::new()
-        .a(777)
-        .b(-666)
+    let builder = Builder::new()
+        .a(777);
+    let builder2 = builder.clone();
+    let built = builder.b(-666)
         .build()
         .unwrap();
     assert_eq!(777, built.a);
     assert_eq!(-666, built.b);
+    let built = builder2
+        .b(123)
+        .build()
+        .unwrap();
+    assert_eq!(777, built.a);
+    assert_eq!(123, built.b);
     let built = Builder2::new()
         .set_a("Hello")
         .build();
