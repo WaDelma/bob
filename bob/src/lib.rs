@@ -87,7 +87,7 @@
 //!
 //! fn main() {
 //!     let my_struct = Builder::new()
-//!         .super_secret("password")
+//!         .super_secret("password".to_owned())
 //!         .build();
 //!     if let Ok(_) = my_struct {
 //!         println!("Access granted.");
@@ -275,7 +275,7 @@ use std::collections::HashSet;
 /// }
 /// impl Builder<O> {
 ///     /// Setter method for **required** field `magics`.
-///     fn magic<_T: Into<Vec<i32>>>(mut self, magic: _T) -> Builder<I> {
+///     fn magic(mut self, magic: Vec<i32>) -> Builder<I> {
 ///         if let BuilderInner::Inner { ref mut _f1, .. } = self.inner {
 ///             // We have to write the value, because the field is uninitialized.
 ///             unsafe { write(_f1 as *mut _, magic.into()); }
@@ -417,7 +417,7 @@ trait Dummy1 {}
 /// }
 /// impl <_1: MaybeInitialized, A, B> MyBuilder<O, _1, A, B> {
 ///     /// Setter method for **required** field `firsts`.
-///     fn set_firsts<_T: Into<Vec<A>>>(mut self, firsts: _T) -> MyBuilder<I, _1, A, B> {
+///     fn set_firsts(mut self, firsts: Vec<A>) -> MyBuilder<I, _1, A, B> {
 ///         if let BuilderInner::Inner { ref mut _f0, .. } = self.inner {
 ///             // We have to write the value, because the field is uninitialized.
 ///             unsafe { write(_f0 as *mut _, firsts.into()); }
@@ -433,7 +433,7 @@ trait Dummy1 {}
 /// }
 /// impl <_0: MaybeInitialized, A, B> MyBuilder<_0, O, A, B> {
 ///     /// Setter method for **required** field `seconds`.
-///     fn with_seconds<_T: Into<Vec<B>>>(mut self, seconds: _T) -> MyBuilder<_0, I, A, B> {
+///     fn with_seconds(mut self, seconds: Vec<B>) -> MyBuilder<_0, I, A, B> {
 ///         if let BuilderInner::Inner { ref mut _f1, .. } = self.inner {
 ///             // We have to write the value, because the field is uninitialized.
 ///             unsafe { write(_f1 as *mut _, seconds.into()); }
@@ -569,7 +569,7 @@ trait Dummy2 {}
 /// }
 /// impl Builder<O> {
 ///     ///Setter method for **required** field `super_secret`.
-///     fn super_secret<_T: Into<String>>(mut self, super_secret: _T) -> Builder<I> {
+///     fn super_secret(mut self, super_secret: String) -> Builder<I> {
 ///         // Because builder has destructor we have to replace inner to get it's values.
 ///         if let BuilderInner::Inner { ref mut _f0, .. } = self.inner {
 ///             unsafe { write(_f0 as *mut _, super_secret.into()); }
@@ -819,7 +819,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                                 #(#builder_opt_field_names: self.#builder_opt_field_names2.clone()),*
                             }
                         } else {
-                            unreachable!("Inner should only be empty after destructor or after build method.");
+                            unreachable!("When cloning inner shouldn't be empty.");
                         }
                     }
                 }
@@ -840,7 +840,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                                 #(.field(stringify!(#builder_opt_field_names), &self.#builder_opt_field_names2))*
                                 .finish()
                         } else {
-                            unreachable!("Inner should only be empty after destructor or after build method.");
+                            unreachable!("When debugging inner shouldn't be empty.");
                         }
                     }
                 }
@@ -864,7 +864,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                                 #(#result_opt_fields: self.#builder_opt_field_names.take()),*
                             })
                         } else {
-                            unreachable!("Inner should only be empty after destructor or after build method.");
+                            unreachable!("When building inner shouldn't be empty.");
                         }
                     }
                 }
@@ -885,7 +885,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
                                 #(#result_opt_fields: self.#builder_opt_field_names.take()),*
                             })
                         } else {
-                            unreachable!("Inner should only be empty after destructor or after build method.");
+                            unreachable!("When building inner shouldn't be empty.");
                         }
                     }
                 }
@@ -906,7 +906,7 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #ext_impl_generics #builder #ext_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name<_T: Into<#ty>>(mut self, #raw_name: _T) -> #builder #ext_ty_generics {
+                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #ext_ty_generics {
                         self.#fname = Some(#raw_name.into());
                         self
                     }
@@ -957,12 +957,12 @@ pub fn create_builder(input: TokenStream) -> TokenStream {
             let parsed: String = quote!(
                 impl #other_impl_generics #builder #set_ty_generics #ext_where_clause {
                     #[doc = #setter_doc]
-                    #vis fn #name<_T: Into<#ty>>(mut self, #raw_name: _T) -> #builder #after_set_ty_generics {
+                    #vis fn #name(mut self, #raw_name: #ty) -> #builder #after_set_ty_generics {
                         if let #builder_mod::BuilderInner::Inner{ref mut #fname, ..} = self.inner {
                             // We have to write the value, because the field is uninitialized.
                             unsafe { ::std::ptr::write(#fname as *mut _, #raw_name.into()); }
                         } else {
-                            unreachable!("Inner should only be empty after destructor or after build method.");
+                            unreachable!("When setting required field inner shouldn't be empty.");
                         }
                         // Because the builder has destructor fields cannot moved out.
                         // This is why we have to read self as return type and forget the old self.

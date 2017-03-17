@@ -1,0 +1,7 @@
+[package]
+name = "bob_test"
+version = "0.1.0"
+authors = ["Wadelma <delma@del.ma>"]
+
+[dependencies]
+bob = {path = "../bob"}
