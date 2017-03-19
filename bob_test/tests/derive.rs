@@ -6,7 +6,7 @@ extern crate bob;
 #[builder_derive(Clone, Debug)]
 #[builder_validate(validator = "Struct::validate", error = "BuildError")]
 pub struct Struct {
-    a: u32,
+    a: String,
     b: i32,
 }
 
@@ -66,28 +66,28 @@ pub struct Struct5 {
 #[test]
 fn build() {
     let builder = Builder::new()
-        .a(777);
-    // let builder2 = builder.clone();
+        .a("777".to_owned());
+    let builder2 = builder.clone();
     let built = builder.b(-666)
         .build()
         .unwrap();
-    assert_eq!(777, built.a);
+    assert_eq!("777", built.a);
     assert_eq!(-666, built.b);
-    // let built = builder2
-    //     .b(123)
-    //     .build()
-    //     .unwrap();
-    // assert_eq!(777, built.a);
-    // assert_eq!(123, built.b);
+    let built = builder2
+        .b(123)
+        .build()
+        .unwrap();
+    assert_eq!("777", built.a);
+    assert_eq!(123, built.b);
     let built = Builder2::new()
         .set_a("Hello")
         .build();
     assert_eq!("Hello", built.a);
-    // let built = Builder3::create()
-    //     .a("World")
-    //     .set_c(-42)
-    //     .finish();
-    // assert_eq!(Some("World"), built.a);
-    // assert_eq!(None, built.b);
-    // assert_eq!(-42, built.c);
+    let built = Builder3::create()
+        .a("World")
+        .set_c(-42)
+        .finish();
+    assert_eq!(Some("World"), built.a);
+    assert_eq!(None, built.b);
+    assert_eq!(-42, built.c);
 }
